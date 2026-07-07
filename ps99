@@ -1,1 +1,1 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/chichitkh100/AKUMA-HUB/refs/heads/main/AKUMA%20HUB"))()
+\loadstring(game:HttpGet("https://gist.githubusercontent.com/chichitkh100/6c3eca797f0c5ad3f665617b294fae77/raw/gistfile1.txt"))()
