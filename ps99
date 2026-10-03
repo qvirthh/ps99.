@@ -1,1 +1,698 @@
-loadstring(game:HttpGet("https://api.rubis.app/v2/scrap/rLTctchGmm5TbrmR/raw",true))()
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+getgenv().QvirthhWar = getgenv().QvirthhWar or {}
+local C = getgenv().QvirthhWar
+C.running = C.running ~= false
+C.verb = C.verb ~= false
+C.breakAll = C.breakAll == true
+C.breakAllDelay = math.max(0.05, tonumber(C.breakAllDelay) or 0.12)
+C.breakAllParent = C.breakAllParent or "HatchWar"
+C.petSpeed = C.petSpeed == true
+C.superMagnet = C.superMagnet == true
+C.autoJoin = C.autoJoin ~= false
+C.orb = false
+C.orbZone = math.floor(tonumber(C.orbZone) or 1)
+if C.orbZone < 1 or C.orbZone > 4 then C.orbZone = 1 end
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local lp = Players.LocalPlayer
+
+C._runId = (C._runId or 0) + 1
+C._orbRun = (C._orbRun or 0) + 1
+local MY_RUN = C._runId
+local function alive() return MY_RUN == C._runId end
+local function log(...) if C.verb then print("[Qvirthh]", ...) end end
+
+if C._afkConn then pcall(function() C._afkConn:Disconnect() end) end
+C._afkConn = lp.Idled:Connect(function()
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local cf = cam and cam.CFrame or CFrame.new()
+        VirtualUser:Button2Down(Vector2.new(0, 0), cf)
+        task.wait(1)
+        VirtualUser:Button2Up(Vector2.new(0, 0), cf)
+    end)
+end)
+
+local function getZoneRoot()
+    local things = workspace:FindFirstChild("__THINGS")
+    local container = things and things:FindFirstChild("__INSTANCE_CONTAINER")
+    local active = container and container:FindFirstChild("Active")
+    return active and active:FindFirstChild("HatchWar")
+end
+
+local function getOrbFolder()
+    local debris = workspace:FindFirstChild("__DEBRIS")
+    return debris and debris:FindFirstChild("HatchWarOrbs")
+end
+
+local function setIdentity(n)
+    local f = setthreadidentity or set_thread_identity or (syn and syn.set_thread_identity)
+    if f then pcall(f, n) end
+end
+
+local function fireNetwork(name)
+    local net = RS:FindFirstChild("Network")
+    local remote = net and net:FindFirstChild(name)
+    if remote then pcall(function() remote:FireServer() end) end
+end
+
+local function clientModule(name, timeout)
+    local lib = RS:WaitForChild("Library", timeout or 10)
+    local client = lib and lib:WaitForChild("Client", timeout or 10)
+    return client and client:WaitForChild(name, timeout or 10)
+end
+
+local PlayerPet = nil
+pcall(function() PlayerPet = require(RS.Library.Client.PlayerPet) end)
+
+local function installPetSpeed()
+    if C._speedHooked then return true end
+    if not hookfunction or not PlayerPet or type(PlayerPet.CalculateSpeedMultiplier) ~= "function" then
+        return false
+    end
+    local orig
+    local ok = pcall(function()
+        orig = hookfunction(PlayerPet.CalculateSpeedMultiplier, function(...)
+            if C.petSpeed then return math.huge end
+            return orig(...)
+        end)
+    end)
+    C._speedHooked = ok and orig ~= nil
+    return C._speedHooked
+end
+
+local magnetConfigBackup = setmetatable({}, { __mode = "k" })
+
+local function applyMagnetConfig(r)
+    if C.superMagnet then
+        r.config = r.config or {}
+        if magnetConfigBackup[r.config] == nil then
+            magnetConfigBackup[r.config] = { orig = r.config.SuperMagnet }
+        end
+        r.config.SuperMagnet = true
+    elseif type(r.config) == "table" and magnetConfigBackup[r.config] then
+        r.config.SuperMagnet = magnetConfigBackup[r.config].orig
+        magnetConfigBackup[r.config] = nil
+    end
+end
+
+local function installMagnet()
+    if C._magnetPatched then return true end
+    local applied = 0
+
+    local function patch(name, fn)
+        local m = clientModule(name, 10)
+        if not m then return end
+        local ok, mod = pcall(require, m)
+        if not ok or type(mod) ~= "table" then return end
+        pcall(function() if setreadonly then setreadonly(mod, false) end end)
+        if pcall(fn, mod) then applied += 1 end
+    end
+
+    patch("EnchantCmds", function(e)
+        local o = e.GetPower
+        e.GetPower = function(...)
+            local p = ...
+            if C.superMagnet and (p == "Super Magnet" or p == "Magnet") then return 999 end
+            return o(...)
+        end
+    end)
+
+    patch("UpgradeCmds", function(u)
+        local o = u.GetPower
+        u.GetPower = function(...)
+            if C.superMagnet and (...) == "Magnet" then return 999 end
+            return o(...)
+        end
+    end)
+
+    patch("InstancingCmds", function(i)
+        local g = i.Get
+        if type(g) ~= "function" then error("no Get") end
+        i.Get = function(...)
+            local r = g(...)
+            if type(r) == "table" then pcall(applyMagnetConfig, r) end
+            return r
+        end
+    end)
+
+    C._magnetPatched = applied > 0
+    return C._magnetPatched
+end
+
+local breakJoinRemote = RS:FindFirstChild("Network") and RS.Network:FindFirstChild("Breakables_JoinPetBulk")
+local breakAssign = {}
+
+local function eventBreakableUIDs()
+    local out = {}
+    local things = workspace:FindFirstChild("__THINGS")
+    local br = things and things:FindFirstChild("Breakables")
+    if not br then return out end
+    for _, m in ipairs(br:GetChildren()) do
+        if m:IsA("Model") and m:GetAttribute("ParentID") == C.breakAllParent then
+            local uid = m:GetAttribute("BreakableUID")
+            if uid then out[#out + 1] = uid end
+        end
+    end
+    return out
+end
+
+local function equippedPetEuids()
+    local out = {}
+    if not PlayerPet then return out end
+    for _, p in pairs(PlayerPet.GetAll()) do
+        if p and p.euid then out[#out + 1] = p.euid end
+    end
+    return out
+end
+
+local function breakAllTick()
+    if not (C.breakAll and breakJoinRemote) then return end
+    local pets = equippedPetEuids()
+    if #pets == 0 then return end
+    local list = eventBreakableUIDs()
+    if #list == 0 then return end
+    local live = {}
+    for _, uid in ipairs(list) do live[uid] = true end
+    local used = {}
+    for e, uid in pairs(breakAssign) do
+        if live[uid] then used[uid] = true else breakAssign[e] = nil end
+    end
+    local free = {}
+    for _, uid in ipairs(list) do
+        if not used[uid] then free[#free + 1] = uid end
+    end
+    local map = {}
+    for _, e in ipairs(pets) do
+        if not breakAssign[e] and #free > 0 then breakAssign[e] = table.remove(free) end
+        if breakAssign[e] and live[breakAssign[e]] then map[e] = breakAssign[e] end
+    end
+    if next(map) then
+        pcall(function() breakJoinRemote:FireServer(map) end)
+    end
+end
+
+task.spawn(function()
+    while alive() do
+        if C.running and C.breakAll then
+            pcall(breakAllTick)
+            task.wait(math.max(0.05, tonumber(C.breakAllDelay) or 0.12))
+        else
+            task.wait(0.2)
+        end
+    end
+end)
+
+local ORB_ZONES = {
+    [1] = "1 | Ember Cliffs",
+    [2] = "2 | Spore Forest",
+    [3] = "3 | Green Graveyard",
+    [4] = "4 | Witching Hour",
+}
+local CLAIM_DISTANCE = 5
+local MOVE_TIMEOUT = 15
+local STUCK_CHECK_TIME = 1.5
+local GLIDE_SPEED = 90
+local MAX_ATTEMPTS = 3
+
+local orbAttempts = {}
+local zoneBounds = {}
+local orbZoneNumber = nil
+local orbZoneInstance = nil
+local useGlide = false
+local lastStatus = ""
+local statusLabel
+
+local function setStatus(text)
+    if statusLabel then statusLabel.Text = "Orb: " .. text end
+    if text ~= lastStatus then
+        lastStatus = text
+        log("Orb:", text)
+    end
+end
+
+local function orbActive(myRun)
+    return alive() and C.orb and C._orbRun == myRun
+end
+
+local function findZone(zoneRoot, number)
+    local exactName = ORB_ZONES[number]
+    if not zoneRoot or not exactName then return nil end
+
+    local zone = zoneRoot:FindFirstChild(exactName)
+    if zone then return zone end
+
+    for _, child in ipairs(zoneRoot:GetChildren()) do
+        if tonumber(child.Name:match("^%s*(%d+)")) == number then
+            return child
+        end
+    end
+    return nil
+end
+
+local function getBounds(instance)
+    local minV, maxV
+
+    local function addPart(part)
+        local cf = part.CFrame
+        local size = part.Size
+        local right, up, look = cf.RightVector, cf.UpVector, cf.LookVector
+
+        local half = Vector3.new(
+            math.abs(right.X) * size.X + math.abs(up.X) * size.Y + math.abs(look.X) * size.Z,
+            math.abs(right.Y) * size.X + math.abs(up.Y) * size.Y + math.abs(look.Y) * size.Z,
+            math.abs(right.Z) * size.X + math.abs(up.Z) * size.Y + math.abs(look.Z) * size.Z
+        ) * 0.5
+
+        local pMin = cf.Position - half
+        local pMax = cf.Position + half
+
+        minV = minV and minV:Min(pMin) or pMin
+        maxV = maxV and maxV:Max(pMax) or pMax
+    end
+
+    if instance:IsA("BasePart") then addPart(instance) end
+    for _, d in ipairs(instance:GetDescendants()) do
+        if d:IsA("BasePart") then addPart(d) end
+    end
+    return minV, maxV
+end
+
+local function refreshZoneBounds()
+    table.clear(zoneBounds)
+    local zoneRoot = getZoneRoot()
+    if not zoneRoot then return end
+
+    for number in pairs(ORB_ZONES) do
+        local zone = findZone(zoneRoot, number)
+        if zone then
+            local minV, maxV = getBounds(zone)
+            if minV and maxV then
+                zoneBounds[number] = { min = minV, max = maxV, center = (minV + maxV) * 0.5 }
+            end
+        end
+    end
+end
+
+local function distanceToBox(point, box)
+    local dx = math.max(box.min.X - point.X, 0, point.X - box.max.X)
+    local dy = math.max(box.min.Y - point.Y, 0, point.Y - box.max.Y)
+    local dz = math.max(box.min.Z - point.Z, 0, point.Z - box.max.Z)
+    return Vector3.new(dx, dy, dz).Magnitude
+end
+
+local function getZoneNumberAt(position)
+    local bestNumber, bestBoxDistance, bestCenterDistance = nil, math.huge, math.huge
+
+    for number, box in pairs(zoneBounds) do
+        local boxDistance = distanceToBox(position, box)
+        local centerDistance = (position - box.center).Magnitude
+
+        if boxDistance < bestBoxDistance - 0.001
+            or (math.abs(boxDistance - bestBoxDistance) <= 0.001 and centerDistance < bestCenterDistance) then
+            bestNumber = number
+            bestBoxDistance = boxDistance
+            bestCenterDistance = centerDistance
+        end
+    end
+    return bestNumber
+end
+
+local function getOrbPart(orbContainer)
+    if orbContainer:IsA("BasePart") then return orbContainer end
+    local orb = orbContainer:FindFirstChild("Orb", true)
+    if orb and orb:IsA("BasePart") then return orb end
+    return orbContainer:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function getOrbId(orbContainer)
+    return tonumber(orbContainer.Name:match("%d+"))
+end
+
+local function isOrbInSelectedZone(orbContainer, orbPart)
+    if orbZoneInstance and orbZoneInstance.Parent and orbZoneInstance:IsAncestorOf(orbContainer) then
+        return true
+    end
+    return getZoneNumberAt(orbPart.Position) == orbZoneNumber
+end
+
+local function getNearestOrb()
+    local character = lp.Character
+    local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+    local orbFolder = getOrbFolder()
+
+    if not rootPart or not orbFolder then return nil, nil, 0, 0 end
+
+    local nearestContainer, nearestPart = nil, nil
+    local nearestDistance = math.huge
+    local total, inZone = 0, 0
+    local present = {}
+
+    for _, orbContainer in ipairs(orbFolder:GetChildren()) do
+        local id = getOrbId(orbContainer)
+        local orbPart = getOrbPart(orbContainer)
+
+        if id and orbPart then
+            present[id] = true
+            total += 1
+
+            if isOrbInSelectedZone(orbContainer, orbPart) then
+                inZone += 1
+
+                if (orbAttempts[id] or 0) < MAX_ATTEMPTS then
+                    local distance = (rootPart.Position - orbPart.Position).Magnitude
+                    if distance < nearestDistance then
+                        nearestDistance = distance
+                        nearestContainer = orbContainer
+                        nearestPart = orbPart
+                    end
+                end
+            end
+        end
+    end
+
+    for id in pairs(orbAttempts) do
+        if not present[id] then orbAttempts[id] = nil end
+    end
+
+    return nearestContainer, nearestPart, inZone, total
+end
+
+local function flatDistance(a, b)
+    return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude
+end
+
+local function moveToOrb(orbPart, myRun)
+    local character = lp.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not rootPart then
+        task.wait(0.5)
+        return false
+    end
+
+    local bindName = "QvirthhOrbMove" .. tostring(myRun)
+    local reached = false
+
+    RunService:BindToRenderStep(bindName, Enum.RenderPriority.Character.Value + 1, function(dt)
+        if not orbActive(myRun) or not orbPart.Parent or not rootPart.Parent then return end
+
+        local offset = orbPart.Position - rootPart.Position
+        local flat = Vector3.new(offset.X, 0, offset.Z)
+
+        if flat.Magnitude <= CLAIM_DISTANCE then
+            reached = true
+            humanoid:Move(Vector3.zero, false)
+            return
+        end
+
+        if useGlide then
+            local step = math.min(GLIDE_SPEED * dt, offset.Magnitude)
+            rootPart.CFrame = rootPart.CFrame + offset.Unit * step
+        else
+            humanoid:Move(flat.Unit, false)
+        end
+    end)
+
+    local startTime = os.clock()
+    local checkTime = startTime
+    local checkDistance = flatDistance(rootPart.Position, orbPart.Position)
+
+    while orbActive(myRun) and orbPart.Parent and rootPart.Parent and not reached do
+        local now = os.clock()
+        if now - startTime >= MOVE_TIMEOUT then break end
+
+        if not useGlide and now - checkTime >= STUCK_CHECK_TIME then
+            local distance = flatDistance(rootPart.Position, orbPart.Position)
+            if checkDistance - distance < 3 then
+                useGlide = true
+                log("Orb: humanoid movement isn't moving the hoverboard, switching to glide mode")
+            end
+            checkTime = now
+            checkDistance = distance
+        end
+
+        task.wait()
+    end
+
+    pcall(function() RunService:UnbindFromRenderStep(bindName) end)
+    humanoid:Move(Vector3.zero, false)
+
+    return reached
+end
+
+local function claimOrb(id)
+    task.spawn(function()
+        local ok, result = pcall(function()
+            local net = RS:FindFirstChild("Network")
+            local remote = net and net:FindFirstChild("Instancing_InvokeCustomFromClient")
+            return remote and remote:InvokeServer("HatchWar", "HW_Orbs_Claim", id)
+        end)
+        log("Orb: claimed", id, ok, result)
+    end)
+end
+
+local function orbWorker(myRun)
+    task.wait(0.5)
+    local lastRefresh = 0
+
+    while orbActive(myRun) do
+        if orbZoneNumber ~= C.orbZone then
+            orbZoneNumber = C.orbZone
+            orbAttempts = {}
+            orbZoneInstance = nil
+            lastRefresh = 0
+        end
+
+        if os.clock() - lastRefresh >= 10 or next(zoneBounds) == nil then
+            refreshZoneBounds()
+            orbZoneInstance = findZone(getZoneRoot(), orbZoneNumber)
+            lastRefresh = os.clock()
+        end
+
+        if next(zoneBounds) == nil then
+            setStatus("HatchWar zones not found - waiting for the event...")
+            task.wait(1)
+        else
+            local orbContainer, orbPart, inZone, total = getNearestOrb()
+
+            if orbContainer and orbPart then
+                local id = getOrbId(orbContainer)
+                orbAttempts[id] = (orbAttempts[id] or 0) + 1
+
+                setStatus(("zone %d | %d orbs in zone (%d total)"):format(orbZoneNumber, inZone, total))
+
+                local reached = moveToOrb(orbPart, myRun)
+                if reached and orbActive(myRun) then
+                    claimOrb(id)
+                    task.wait(0.15)
+                end
+            else
+                setStatus(("zone %d | waiting for orbs (%d in zone, %d total)"):format(orbZoneNumber, inZone, total))
+                task.wait(0.25)
+            end
+        end
+
+        task.wait(0.05)
+    end
+end
+
+local function stopHumanoid()
+    local character = lp.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then humanoid:Move(Vector3.zero, false) end
+end
+
+local function startOrb()
+    orbAttempts = {}
+    useGlide = false
+    orbZoneNumber = C.orbZone
+    orbZoneInstance = findZone(getZoneRoot(), orbZoneNumber)
+
+    C._orbRun = (C._orbRun or 0) + 1
+    local myRun = C._orbRun
+
+    fireNetwork("Hoverboard_RequestEquip")
+    setStatus("started - " .. ORB_ZONES[orbZoneNumber])
+    task.spawn(orbWorker, myRun)
+end
+
+local function stopOrb()
+    C._orbRun = (C._orbRun or 0) + 1
+    fireNetwork("Hoverboard_RequestUnequip")
+    stopHumanoid()
+    setStatus("stopped")
+end
+
+local function inst(cls, props, parent)
+    local o = Instance.new(cls)
+    for k, v in pairs(props or {}) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+local function corner(r, p) return inst("UICorner", { CornerRadius = UDim.new(0, r or 6) }, p) end
+local function stroke(t, c, p) return inst("UIStroke", { Thickness = t or 1, Color = c or Color3.fromRGB(55, 55, 55), ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, p) end
+
+local BG = Color3.fromRGB(0, 0, 0)
+local EL = Color3.fromRGB(18, 18, 18)
+local TXT = Color3.fromRGB(235, 235, 235)
+local MID = Color3.fromRGB(150, 150, 150)
+local OFF = Color3.fromRGB(80, 80, 80)
+local LINE = Color3.fromRGB(55, 55, 55)
+local ACC = Color3.fromRGB(255, 255, 255)
+
+local gp
+do local ok, h = pcall(function() return gethui and gethui() end); gp = (ok and h) or lp:WaitForChild("PlayerGui") end
+local old = gp:FindFirstChild("QvirthhWar"); if old then old:Destroy() end
+local oldReopen = gp:FindFirstChild("QvirthhWar_Reopen"); if oldReopen then oldReopen:Destroy() end
+
+local sg = inst("ScreenGui", { Name = "QvirthhWar", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 100 }, gp)
+local main = inst("Frame", { Size = UDim2.new(0, 360, 0, 350), Position = UDim2.new(0.5, -180, 0.5, -175), BackgroundColor3 = BG, BackgroundTransparency = 0.25, BorderSizePixel = 0 }, sg)
+corner(12, main); stroke(1, LINE, main)
+local bar = inst("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundColor3 = EL, BackgroundTransparency = 0.4, BorderSizePixel = 0 }, main); corner(12, bar)
+inst("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Font = Enum.Font.GothamBlack, TextSize = 18, TextColor3 = TXT, TextXAlignment = Enum.TextXAlignment.Center, Text = "Qvirthh" }, bar)
+local xb = inst("TextButton", { Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(1, -34, 0, 10), BackgroundColor3 = EL, BackgroundTransparency = 0.3, Text = "X", TextColor3 = MID, Font = Enum.Font.GothamBold, TextSize = 14, BorderSizePixel = 0 }, bar); corner(6, xb)
+
+local list = inst("ScrollingFrame", {
+    Size = UDim2.new(1, -20, 1, -56), Position = UDim2.new(0, 10, 0, 50),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = LINE,
+    CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, main)
+inst("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+
+local sync = {}
+local order = 0
+local function nextOrder() order += 1; return order end
+
+local function toggle(title, get, set)
+    local f = inst("Frame", { LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = EL, BackgroundTransparency = 0.35, BorderSizePixel = 0 }, list); corner(10, f); stroke(1, LINE, f)
+    inst("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(0.78, -8, 1, 0), Position = UDim2.new(0, 12, 0, 0), Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = TXT, TextXAlignment = Enum.TextXAlignment.Left, Text = title }, f)
+    local sw = inst("Frame", { Size = UDim2.new(0, 44, 0, 22), Position = UDim2.new(1, -56, 0.5, -11), BackgroundColor3 = Color3.fromRGB(30, 30, 30), BackgroundTransparency = 0.2, BorderSizePixel = 0 }, f); corner(11, sw); stroke(1, LINE, sw)
+    local ind = inst("Frame", { Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(0, 3, 0.5, -8), BackgroundColor3 = OFF, BorderSizePixel = 0 }, sw); corner(8, ind)
+    local btn = inst("TextButton", { Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "" }, f)
+    local function rf()
+        local on = get()
+        pcall(function()
+            ind.Position = on and UDim2.new(0, 25, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+            ind.BackgroundColor3 = on and ACC or OFF
+        end)
+    end
+    btn.MouseButton1Click:Connect(function() set(not get()); rf() end)
+    table.insert(sync, rf); rf()
+end
+
+local function numRow(title, get, set)
+    local f = inst("Frame", { LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = EL, BackgroundTransparency = 0.35, BorderSizePixel = 0 }, list); corner(10, f); stroke(1, LINE, f)
+    inst("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(0.5, -8, 1, 0), Position = UDim2.new(0, 12, 0, 0), Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = TXT, TextXAlignment = Enum.TextXAlignment.Left, Text = title }, f)
+    local tb = inst("TextBox", { Size = UDim2.new(0.42, -10, 0, 26), Position = UDim2.new(0.54, 0, 0.5, -13), BackgroundColor3 = Color3.fromRGB(30, 30, 30), BackgroundTransparency = 0.3, Text = tostring(get()), TextColor3 = TXT, Font = Enum.Font.Gotham, TextSize = 13, BorderSizePixel = 0, ClearTextOnFocus = false }, f); corner(8, tb); stroke(1, LINE, tb)
+    tb.FocusLost:Connect(function()
+        local v = tonumber(tb.Text)
+        if v then set(v) end
+        tb.Text = tostring(get())
+    end)
+    table.insert(sync, function() if not tb:IsFocused() then tb.Text = tostring(get()) end end)
+end
+
+toggle("Orb Collector (hoverboard)", function() return C.orb end, function(v)
+    C.orb = v
+    if v then startOrb() else stopOrb() end
+end)
+numRow("Orb Zone (1-4)", function() return C.orbZone end, function(v)
+    v = math.floor(v)
+    if ORB_ZONES[v] then
+        C.orbZone = v
+    else
+        setStatus("invalid zone - enter 1, 2, 3 or 4")
+    end
+end)
+statusLabel = inst("TextLabel", {
+    LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+    Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = MID, TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, Text = "Orb: idle",
+}, list)
+
+toggle("Break ALL event zones (no TP)", function() return C.breakAll end, function(v) C.breakAll = v end)
+numRow("Delay (s)", function() return C.breakAllDelay end, function(v) C.breakAllDelay = math.max(0.05, tonumber(v) or C.breakAllDelay) end)
+
+toggle("Infinite Pet Speed", function() return C.petSpeed end, function(v)
+    if v and not installPetSpeed() then
+        log("Infinite Pet Speed unavailable (hookfunction or PlayerPet missing)")
+        v = false
+    end
+    C.petSpeed = v
+end)
+toggle("Super Magnet", function() return C.superMagnet end, function(v)
+    if v and not installMagnet() then
+        log("Super Magnet unavailable (couldn't patch the client modules)")
+        v = false
+    end
+    C.superMagnet = v
+end)
+
+if C.petSpeed and not installPetSpeed() then C.petSpeed = false end
+if C.superMagnet and not installMagnet() then C.superMagnet = false end
+
+local reopen = inst("ScreenGui", { Name = "QvirthhWar_Reopen", ResetOnSpawn = false, DisplayOrder = 99 }, gp)
+local rb = inst("TextButton", { Size = UDim2.new(0, 58, 0, 40), Position = UDim2.new(0, 20, 0.5, -20), BackgroundColor3 = BG, BackgroundTransparency = 0.25, Text = "QV", TextColor3 = TXT, Font = Enum.Font.GothamBlack, TextSize = 16, BorderSizePixel = 0, Visible = false }, reopen); corner(10, rb); stroke(1, LINE, rb)
+do
+    local rbd, rbs, rbp, rbm = false, nil, nil, false
+    rb.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then rbd = true; rbm = false; rbs = i.Position; rbp = rb.Position end end)
+    UIS.InputChanged:Connect(function(i) if rbd and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then local d = i.Position - rbs; if d.Magnitude > 4 then rbm = true end; rb.Position = UDim2.new(rbp.X.Scale, rbp.X.Offset + d.X, rbp.Y.Scale, rbp.Y.Offset + d.Y) end end)
+    UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then rbd = false end end)
+    rb.MouseButton1Click:Connect(function() if rbm then return end; main.Visible = true; rb.Visible = false end)
+end
+xb.MouseButton1Click:Connect(function() main.Visible = false; rb.Visible = true end)
+do
+    local drag, ds, sp
+    bar.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then drag = true; ds = i.Position; sp = main.Position end end)
+    UIS.InputChanged:Connect(function(i) if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then local d = i.Position - ds; main.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y) end end)
+    UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then drag = false end end)
+end
+
+task.spawn(function()
+    while alive() do
+        for _, rf in ipairs(sync) do pcall(rf) end
+        task.wait(0.5)
+    end
+end)
+
+task.spawn(function()
+    if not C.autoJoin then return end
+    task.wait(2)
+
+    local mod = clientModule("InstancingCmds", 30)
+    if not mod then log("Auto-join: InstancingCmds not found"); return end
+    local ok, I = pcall(require, mod)
+    if not ok or type(I) ~= "table" or type(I.Enter) ~= "function" then
+        log("Auto-join: InstancingCmds unavailable")
+        return
+    end
+
+    for attempt = 1, 3 do
+        if not alive() then return end
+        if getZoneRoot() then log("Already inside HatchWar"); return end
+
+        log("Joining HatchWar (attempt " .. attempt .. ")")
+        setIdentity(2)
+        local okE, err = pcall(I.Enter, "HatchWar")
+        setIdentity(7)
+        if not okE then log("Auto-join error:", err) end
+
+        local t = os.clock()
+        while alive() and os.clock() - t < 15 do
+            if getZoneRoot() then log("Joined HatchWar"); return end
+            task.wait(0.5)
+        end
+    end
+    log("Auto-join: couldn't confirm HatchWar entry")
+end)
+
+log("QvirthhWar loaded.")
+return true
