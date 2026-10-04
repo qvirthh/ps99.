@@ -9,6 +9,7 @@ C.breakAllDelay = math.max(0.05, tonumber(C.breakAllDelay) or 0.12)
 C.breakAllParent = C.breakAllParent or "HatchWar"
 C.petSpeed = C.petSpeed == true
 C.superMagnet = C.superMagnet == true
+C.efficientFarm = C.efficientFarm == true
 C.autoJoin = C.autoJoin ~= false
 C.orb = false
 C.orbZone = math.floor(tonumber(C.orbZone) or 1)
@@ -24,6 +25,10 @@ local lp = Players.LocalPlayer
 C._runId = (C._runId or 0) + 1
 C._orbRun = (C._orbRun or 0) + 1
 local MY_RUN = C._runId
+if C._efConns then
+    for _, c in ipairs(C._efConns) do pcall(function() c:Disconnect() end) end
+end
+C._efConns = {}
 local function alive() return MY_RUN == C._runId end
 local function log(...) if C.verb then print("[Qvirthh]", ...) end end
 
@@ -70,8 +75,10 @@ end
 local PlayerPet = nil
 pcall(function() PlayerPet = require(RS.Library.Client.PlayerPet) end)
 
+local SPEED_HOOK_VERSION = 2
+
 local function installPetSpeed()
-    if C._speedHooked then return true end
+    if C._speedHookVersion == SPEED_HOOK_VERSION then return true end
     if not hookfunction or not PlayerPet or type(PlayerPet.CalculateSpeedMultiplier) ~= "function" then
         return false
     end
@@ -79,11 +86,12 @@ local function installPetSpeed()
     local ok = pcall(function()
         orig = hookfunction(PlayerPet.CalculateSpeedMultiplier, function(...)
             if C.petSpeed then return math.huge end
+            if C.efficientFarm then return 500 end
             return orig(...)
         end)
     end)
-    C._speedHooked = ok and orig ~= nil
-    return C._speedHooked
+    if ok and orig ~= nil then C._speedHookVersion = SPEED_HOOK_VERSION end
+    return C._speedHookVersion == SPEED_HOOK_VERSION
 end
 
 local magnetConfigBackup = setmetatable({}, { __mode = "k" })
@@ -202,6 +210,95 @@ task.spawn(function()
         if C.running and C.breakAll then
             pcall(breakAllTick)
             task.wait(math.max(0.05, tonumber(C.breakAllDelay) or 0.12))
+        else
+            task.wait(0.2)
+        end
+    end
+end)
+
+local efReady = false
+local efNetwork, efMapCmds
+
+local function efNearbyBreakables()
+    local out = {}
+    local character = lp.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local things = workspace:FindFirstChild("__THINGS")
+    local folder = things and things:FindFirstChild("Breakables")
+    if not (hrp and folder) then return out end
+
+    local zone = efMapCmds.GetCurrentZone()
+    for _, b in ipairs(folder:GetChildren()) do
+        local parentID = b:GetAttribute("ParentID")
+        if parentID == "TimeTrial" or parentID == zone then
+            local uid = b:GetAttribute("BreakableUID")
+            local part = b:FindFirstChildWhichIsA("BasePart", true)
+            if uid and part and (part.Position - hrp.Position).Magnitude <= 1500 then
+                out[#out + 1] = uid
+            end
+        end
+    end
+    return out
+end
+
+local function efficientFarmTick()
+    local pets = equippedPetEuids()
+    local list = efNearbyBreakables()
+    local breakableCount = #list
+    if #pets == 0 or breakableCount == 0 then return end
+
+    local map = {}
+    for i, euid in ipairs(pets) do
+        map[euid] = list[(i - 1) % breakableCount + 1]
+    end
+
+    if efNetwork.UnreliableFire then
+        pcall(efNetwork.UnreliableFire, "Breakables_PlayerDealDamage", list[1])
+    end
+    pcall(efNetwork.Fire, "Breakables_JoinPetBulk", map)
+end
+
+local function efConnectLoot(folderName, eventName)
+    task.spawn(function()
+        local things = workspace:WaitForChild("__THINGS", 10)
+        local folder = things and things:WaitForChild(folderName, 10)
+        if not folder or not alive() then return end
+        local conn = folder.ChildAdded:Connect(function(item)
+            if not (C.running and C.efficientFarm) then return end
+            pcall(function()
+                efNetwork.Fire(eventName, { item.Name })
+                item:Destroy()
+            end)
+        end)
+        table.insert(C._efConns, conn)
+    end)
+end
+
+local function installEfficientFarm()
+    if efReady then return true end
+
+    local t = os.clock()
+    while not lp:GetAttribute("__LOADED") and os.clock() - t < 15 do task.wait() end
+
+    local okN, N = pcall(function() return require(clientModule("Network", 10)) end)
+    local okM, M = pcall(function() return require(clientModule("MapCmds", 10)) end)
+    if not (okN and okM and type(N) == "table" and type(M) == "table"
+        and type(N.Fire) == "function" and type(M.GetCurrentZone) == "function") then
+        return false
+    end
+
+    efNetwork, efMapCmds = N, M
+    efReady = true
+    efConnectLoot("Lootbags", "Lootbags_Claim")
+    efConnectLoot("Orbs", "Orbs: Collect")
+    return true
+end
+
+task.spawn(function()
+    while alive() do
+        if C.running and C.efficientFarm and efReady then
+            pcall(efficientFarmTick)
+            task.wait(0.05)
         else
             task.wait(0.2)
         end
@@ -621,6 +718,17 @@ statusLabel = inst("TextLabel", {
 toggle("Break ALL event zones (no TP)", function() return C.breakAll end, function(v) C.breakAll = v end)
 numRow("Delay (s)", function() return C.breakAllDelay end, function(v) C.breakAllDelay = math.max(0.05, tonumber(v) or C.breakAllDelay) end)
 
+toggle("Auto Efficient Farm", function() return C.efficientFarm end, function(v)
+    if v then
+        if not installEfficientFarm() then
+            log("Auto Efficient Farm unavailable (couldn't load Network/MapCmds)")
+            v = false
+        elseif not installPetSpeed() then
+            log("Auto Efficient Farm: pet speed hook unavailable, farming without the speed boost")
+        end
+    end
+    C.efficientFarm = v
+end)
 toggle("Infinite Pet Speed", function() return C.petSpeed end, function(v)
     if v and not installPetSpeed() then
         log("Infinite Pet Speed unavailable (hookfunction or PlayerPet missing)")
@@ -637,6 +745,12 @@ toggle("Super Magnet", function() return C.superMagnet end, function(v)
 end)
 
 if C.petSpeed and not installPetSpeed() then C.petSpeed = false end
+if C.efficientFarm then
+    task.spawn(function()
+        if not installEfficientFarm() then C.efficientFarm = false; return end
+        installPetSpeed()
+    end)
+end
 if C.superMagnet and not installMagnet() then C.superMagnet = false end
 
 local reopen = inst("ScreenGui", { Name = "QvirthhWar_Reopen", ResetOnSpawn = false, DisplayOrder = 99 }, gp)
